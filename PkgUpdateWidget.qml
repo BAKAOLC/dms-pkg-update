@@ -8,19 +8,54 @@ import qs.Modules.Plugins
 PluginComponent {
     id: root
 
-    // ── State ────────────────────────────────────────────────────────────────
-    property var dnfUpdates: []
-    property var flatpakUpdates: []
-    property bool dnfChecking: true
-    property bool flatpakChecking: true
+    function clampInt(value, min, max, fallbackValue) {
+        const parsed = Number(value)
+        if (!isFinite(parsed))
+            return fallbackValue
+        return Math.max(min, Math.min(max, Math.round(parsed)))
+    }
+
+    // ── Source model ──────────────────────────────────────────────────────────
+    readonly property var sourceOrder: ["dnf", "flatpak"]
+    readonly property var sourceDefinitions: ({
+            "dnf": {
+                id: "dnf",
+                label: "DNF",
+                checkCommand: "dnf list --upgrades --color=never 2>/dev/null",
+                updateCommand: "sudo dnf upgrade -y"
+            },
+            "flatpak": {
+                id: "flatpak",
+                label: "Flatpak",
+                checkCommand: "flatpak remote-ls --updates 2>/dev/null",
+                updateCommand: "flatpak update -y"
+            }
+        })
+
+    property var sourceUpdates: ({
+            "dnf": [],
+            "flatpak": []
+        })
+
+    property var sourceChecking: ({
+            "dnf": true,
+            "flatpak": true
+        })
 
     // ── Settings (from plugin data) ───────────────────────────────────────────
-    property string terminalApp: pluginData.terminalApp || "alacritty"
-    property int refreshMins: pluginData.refreshMins || 60
+    property string terminalApp: (pluginData.terminalApp && pluginData.terminalApp.trim().length > 0) ? pluginData.terminalApp.trim() : "alacritty"
+    property int refreshMins: clampInt(pluginData.refreshMins, 5, 240, 60)
+    property bool checkOnStartup: pluginData.checkOnStartup !== undefined ? pluginData.checkOnStartup : true
+    property int maxListHeight: clampInt(pluginData.maxListHeight, 120, 400, 180)
     property bool showFlatpak: pluginData.showFlatpak !== undefined ? pluginData.showFlatpak : true
+    property bool hideWhenNoUpdates: pluginData.hideWhenNoUpdates !== undefined ? pluginData.hideWhenNoUpdates : false
 
-    property int totalUpdates: dnfUpdates.length + (showFlatpak ? flatpakUpdates.length : 0)
+    readonly property int totalUpdates: totalUpdateCount()
+    readonly property bool anyChecking: hasAnyCheckingSource()
+    readonly property bool shouldHide: hideWhenNoUpdates && !anyChecking && totalUpdates === 0
+    readonly property string summaryText: totalUpdates > 0 ? totalUpdates + " update" + (totalUpdates !== 1 ? "s" : "") + " available" : "System is up to date"
 
+    visible: !shouldHide
     popoutWidth: 480
 
     // ── Periodic refresh ──────────────────────────────────────────────────────
@@ -28,27 +63,96 @@ PluginComponent {
         interval: root.refreshMins * 60000
         running: true
         repeat: true
-        triggeredOnStart: true
+        triggeredOnStart: root.checkOnStartup
         onTriggered: root.checkUpdates()
     }
 
     // ── Update check functions ────────────────────────────────────────────────
-    function checkUpdates() {
-        root.dnfChecking = true
-        Proc.runCommand("pkgUpdate.dnf", ["sh", "-c", "dnf list --upgrades --color=never 2>/dev/null"], (stdout, exitCode) => {
-            root.dnfUpdates = parseDnfPackages(stdout)
-            root.dnfChecking = false
-        }, 100)
+    function isSourceEnabled(sourceId) {
+        if (sourceId === "flatpak")
+            return root.showFlatpak
+        return true
+    }
 
-        if (root.showFlatpak) {
-            root.flatpakChecking = true
-            Proc.runCommand("pkgUpdate.flatpak", ["sh", "-c", "flatpak remote-ls --updates 2>/dev/null"], (stdout, exitCode) => {
-                root.flatpakUpdates = parseFlatpakApps(stdout)
-                root.flatpakChecking = false
-            }, 100)
-        } else {
-            root.flatpakChecking = false
+    function sourceUpdatesFor(sourceId) {
+        return sourceUpdates[sourceId] || []
+    }
+
+    function sourceCount(sourceId) {
+        return sourceUpdatesFor(sourceId).length
+    }
+
+    function totalUpdateCount() {
+        let total = 0
+        for (const sourceId of sourceOrder) {
+            if (isSourceEnabled(sourceId))
+                total += sourceCount(sourceId)
         }
+        return total
+    }
+
+    function sourceHasUpdates(sourceId) {
+        return sourceCount(sourceId) > 0
+    }
+
+    function sourceIsChecking(sourceId) {
+        return isSourceEnabled(sourceId) && !!sourceChecking[sourceId]
+    }
+
+    function hasAnyCheckingSource() {
+        for (const sourceId of sourceOrder) {
+            if (sourceIsChecking(sourceId))
+                return true
+        }
+        return false
+    }
+
+    function withSourceValue(currentMap, sourceId, value) {
+        const nextMap = ({})
+        for (const key in currentMap)
+            nextMap[key] = currentMap[key]
+        nextMap[sourceId] = value
+        return nextMap
+    }
+
+    function setSourceUpdates(sourceId, updates) {
+        sourceUpdates = withSourceValue(sourceUpdates, sourceId, updates)
+    }
+
+    function setSourceChecking(sourceId, checking) {
+        sourceChecking = withSourceValue(sourceChecking, sourceId, checking)
+    }
+
+    function parseUpdatesForSource(sourceId, stdout) {
+        if (sourceId === "dnf")
+            return parseDnfPackages(stdout)
+        if (sourceId === "flatpak")
+            return parseFlatpakApps(stdout)
+        return []
+    }
+
+    function checkSourceUpdates(sourceId) {
+        if (!isSourceEnabled(sourceId)) {
+            setSourceChecking(sourceId, false)
+            return
+        }
+
+        const definition = sourceDefinitions[sourceId]
+        if (!definition) {
+            setSourceChecking(sourceId, false)
+            return
+        }
+
+        setSourceChecking(sourceId, true)
+        Proc.runCommand("pkgUpdate." + sourceId, ["sh", "-c", definition.checkCommand], (stdout, exitCode) => {
+            setSourceUpdates(sourceId, parseUpdatesForSource(sourceId, stdout))
+            setSourceChecking(sourceId, false)
+        }, 100)
+    }
+
+    function checkUpdates() {
+        for (const sourceId of sourceOrder)
+            checkSourceUpdates(sourceId)
     }
 
     function parseDnfPackages(stdout) {
@@ -81,56 +185,86 @@ PluginComponent {
     }
 
     // ── Terminal launch ───────────────────────────────────────────────────────
-    function runDnfUpdate() {
+    function runUpdateCommand(updateCommand) {
         root.closePopout()
-        const cmd = "sudo dnf upgrade -y; echo; echo '=== Done. Press Enter to close. ==='; read"
+        const cmd = updateCommand + "; echo; echo '=== Done. Press Enter to close. ==='; read"
         Quickshell.execDetached(["sh", "-c", root.terminalApp + " -e sh -c '" + cmd + "'"])
     }
 
-    function runFlatpakUpdate() {
-        root.closePopout()
-        const cmd = "flatpak update -y; echo; echo '=== Done. Press Enter to close. ==='; read"
-        Quickshell.execDetached(["sh", "-c", root.terminalApp + " -e sh -c '" + cmd + "'"])
+    function runSourceUpdate(sourceId) {
+        const definition = sourceDefinitions[sourceId]
+        if (!definition)
+            return
+        runUpdateCommand(definition.updateCommand)
+    }
+
+    function sectionHeight(isChecking, updatesCount) {
+        if (isChecking)
+            return 52
+        if (updatesCount === 0)
+            return 46
+        return Math.min(updatesCount * 38 + 8, root.maxListHeight)
     }
 
     // ── Bar pills ─────────────────────────────────────────────────────────────
-    horizontalBarPill: Component {
-        Row {
-            spacing: Theme.spacingXS
+    horizontalBarPill: !root.shouldHide ? horizontalPillComponent : null
+    verticalBarPill: !root.shouldHide ? verticalPillComponent : null
 
-            DankIcon {
-                name: root.totalUpdates > 0 ? "system_update" : "check_circle"
-                color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
-                size: root.iconSize
-                anchors.verticalCenter: parent.verticalCenter
-            }
+    Component {
+        id: horizontalPillComponent
 
-            StyledText {
-                anchors.verticalCenter: parent.verticalCenter
-                text: (root.dnfChecking || (root.showFlatpak && root.flatpakChecking)) ? "…" : root.totalUpdates.toString()
-                color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
-                font.pixelSize: Theme.fontSizeMedium
+        Item {
+            implicitWidth: root.shouldHide ? 0 : contentRow.implicitWidth
+            implicitHeight: root.shouldHide ? 0 : contentRow.implicitHeight
+            visible: !root.shouldHide
+
+            Row {
+                id: contentRow
+                spacing: Theme.spacingXS
+
+                DankIcon {
+                    name: root.totalUpdates > 0 ? "system_update" : "check_circle"
+                    color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
+                    size: root.iconSize
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                StyledText {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.anyChecking ? "…" : root.totalUpdates.toString()
+                    color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
+                    font.pixelSize: Theme.fontSizeMedium
+                }
             }
         }
     }
 
-    verticalBarPill: Component {
-        Column {
-            spacing: 2
-            anchors.horizontalCenter: parent.horizontalCenter
+    Component {
+        id: verticalPillComponent
 
-            DankIcon {
-                name: root.totalUpdates > 0 ? "system_update" : "check_circle"
-                color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
-                size: root.iconSize
-                anchors.horizontalCenter: parent.horizontalCenter
-            }
+        Item {
+            implicitWidth: root.shouldHide ? 0 : contentColumn.implicitWidth
+            implicitHeight: root.shouldHide ? 0 : contentColumn.implicitHeight
+            visible: !root.shouldHide
 
-            StyledText {
+            Column {
+                id: contentColumn
+                spacing: 2
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: (root.dnfChecking || (root.showFlatpak && root.flatpakChecking)) ? "…" : root.totalUpdates.toString()
-                color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
-                font.pixelSize: Theme.fontSizeSmall
+
+                DankIcon {
+                    name: root.totalUpdates > 0 ? "system_update" : "check_circle"
+                    color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
+                    size: root.iconSize
+                    anchors.horizontalCenter: parent.horizontalCenter
+                }
+
+                StyledText {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: root.anyChecking ? "…" : root.totalUpdates.toString()
+                    color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
+                    font.pixelSize: Theme.fontSizeSmall
+                }
             }
         }
     }
@@ -202,7 +336,7 @@ PluginComponent {
                         }
 
                         StyledText {
-                            text: root.totalUpdates > 0 ? root.totalUpdates + " update" + (root.totalUpdates !== 1 ? "s" : "") + " available" : "System is up to date"
+                            text: root.summaryText
                             font.pixelSize: Theme.fontSizeSmall
                             color: root.totalUpdates > 0 ? Theme.primary : Theme.secondary
                         }
@@ -221,11 +355,6 @@ PluginComponent {
                         anchors.fill: parent
                         radius: 16
                         color: refreshArea.containsMouse ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.2) : "transparent"
-                        Behavior on color {
-                            ColorAnimation {
-                                duration: 150
-                            }
-                        }
                     }
 
                     DankIcon {
@@ -287,7 +416,7 @@ PluginComponent {
 
                         StyledText {
                             id: dnfCountLabel
-                            text: root.dnfChecking ? "…" : root.dnfUpdates.length.toString()
+                            text: root.sourceIsChecking("dnf") ? "…" : root.sourceCount("dnf").toString()
                             font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Bold
                             color: Theme.primary
@@ -302,7 +431,7 @@ PluginComponent {
                     anchors.verticalCenter: parent.verticalCenter
                     width: dnfBtnRow.width + Theme.spacingM * 2
                     height: 30
-                    visible: !root.dnfChecking && root.dnfUpdates.length > 0
+                    visible: !root.sourceIsChecking("dnf") && root.sourceHasUpdates("dnf")
 
                     Rectangle {
                         anchors.fill: parent
@@ -310,11 +439,6 @@ PluginComponent {
                         color: dnfBtnArea.containsMouse ? Theme.primary : Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.15)
                         border.width: 1
                         border.color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.4)
-                        Behavior on color {
-                            ColorAnimation {
-                                duration: 150
-                            }
-                        }
                     }
 
                     Row {
@@ -343,7 +467,7 @@ PluginComponent {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.runDnfUpdate()
+                        onClicked: root.runSourceUpdate("dnf")
                     }
                 }
             }
@@ -351,24 +475,17 @@ PluginComponent {
             // ── DNF update list ──────────────────────────────────────────────
             StyledRect {
                 width: parent.width
-                height: root.dnfChecking ? 52 : (root.dnfUpdates.length === 0 ? 46 : Math.min(root.dnfUpdates.length * 38 + 8, 180))
+                height: root.sectionHeight(root.sourceIsChecking("dnf"), root.sourceCount("dnf"))
                 radius: Theme.cornerRadius * 1.5
                 color: Qt.rgba(Theme.surfaceContainer.r, Theme.surfaceContainer.g, Theme.surfaceContainer.b, 0.5)
                 border.width: 1
                 border.color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.1)
                 clip: true
 
-                Behavior on height {
-                    NumberAnimation {
-                        duration: 200
-                        easing.type: Easing.OutCubic
-                    }
-                }
-
                 Row {
                     anchors.centerIn: parent
                     spacing: Theme.spacingS
-                    visible: root.dnfChecking
+                    visible: root.sourceIsChecking("dnf")
 
                     DankIcon {
                         name: "sync"
@@ -388,7 +505,7 @@ PluginComponent {
                 Row {
                     anchors.centerIn: parent
                     spacing: Theme.spacingS
-                    visible: !root.dnfChecking && root.dnfUpdates.length === 0
+                    visible: !root.sourceIsChecking("dnf") && !root.sourceHasUpdates("dnf")
 
                     DankIcon {
                         name: "check_circle"
@@ -409,9 +526,9 @@ PluginComponent {
                     anchors.fill: parent
                     anchors.margins: 4
                     clip: true
-                    model: root.dnfUpdates
+                    model: root.sourceUpdatesFor("dnf")
                     spacing: 2
-                    visible: !root.dnfChecking && root.dnfUpdates.length > 0
+                    visible: !root.sourceIsChecking("dnf") && root.sourceHasUpdates("dnf")
 
                     delegate: Item {
                         width: ListView.view.width
@@ -460,7 +577,7 @@ PluginComponent {
             Item {
                 width: parent.width
                 height: 36
-                visible: root.showFlatpak
+                visible: root.isSourceEnabled("flatpak")
 
                 Row {
                     anchors.left: parent.left
@@ -499,7 +616,7 @@ PluginComponent {
 
                         StyledText {
                             id: flatpakCountLabel
-                            text: root.flatpakChecking ? "…" : root.flatpakUpdates.length.toString()
+                            text: root.sourceIsChecking("flatpak") ? "…" : root.sourceCount("flatpak").toString()
                             font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Bold
                             color: Theme.secondary
@@ -514,7 +631,7 @@ PluginComponent {
                     anchors.verticalCenter: parent.verticalCenter
                     width: flatpakBtnRow.width + Theme.spacingM * 2
                     height: 30
-                    visible: !root.flatpakChecking && root.flatpakUpdates.length > 0
+                    visible: !root.sourceIsChecking("flatpak") && root.sourceHasUpdates("flatpak")
 
                     Rectangle {
                         anchors.fill: parent
@@ -522,11 +639,6 @@ PluginComponent {
                         color: flatpakBtnArea.containsMouse ? Theme.secondary : Qt.rgba(Theme.secondary.r, Theme.secondary.g, Theme.secondary.b, 0.15)
                         border.width: 1
                         border.color: Qt.rgba(Theme.secondary.r, Theme.secondary.g, Theme.secondary.b, 0.4)
-                        Behavior on color {
-                            ColorAnimation {
-                                duration: 150
-                            }
-                        }
                     }
 
                     Row {
@@ -555,7 +667,7 @@ PluginComponent {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.runFlatpakUpdate()
+                        onClicked: root.runSourceUpdate("flatpak")
                     }
                 }
             }
@@ -563,25 +675,18 @@ PluginComponent {
             // ── Flatpak update list ──────────────────────────────────────────
             StyledRect {
                 width: parent.width
-                height: root.flatpakChecking ? 52 : (root.flatpakUpdates.length === 0 ? 46 : Math.min(root.flatpakUpdates.length * 38 + 8, 180))
+                height: root.sectionHeight(root.sourceIsChecking("flatpak"), root.sourceCount("flatpak"))
                 radius: Theme.cornerRadius * 1.5
                 color: Qt.rgba(Theme.surfaceContainer.r, Theme.surfaceContainer.g, Theme.surfaceContainer.b, 0.5)
                 border.width: 1
                 border.color: Qt.rgba(Theme.secondary.r, Theme.secondary.g, Theme.secondary.b, 0.1)
                 clip: true
-                visible: root.showFlatpak
-
-                Behavior on height {
-                    NumberAnimation {
-                        duration: 200
-                        easing.type: Easing.OutCubic
-                    }
-                }
+                visible: root.isSourceEnabled("flatpak")
 
                 Row {
                     anchors.centerIn: parent
                     spacing: Theme.spacingS
-                    visible: root.flatpakChecking
+                    visible: root.sourceIsChecking("flatpak")
 
                     DankIcon {
                         name: "sync"
@@ -601,7 +706,7 @@ PluginComponent {
                 Row {
                     anchors.centerIn: parent
                     spacing: Theme.spacingS
-                    visible: !root.flatpakChecking && root.flatpakUpdates.length === 0
+                    visible: !root.sourceIsChecking("flatpak") && !root.sourceHasUpdates("flatpak")
 
                     DankIcon {
                         name: "check_circle"
@@ -622,9 +727,9 @@ PluginComponent {
                     anchors.fill: parent
                     anchors.margins: 4
                     clip: true
-                    model: root.flatpakUpdates
+                    model: root.sourceUpdatesFor("flatpak")
                     spacing: 2
-                    visible: !root.flatpakChecking && root.flatpakUpdates.length > 0
+                    visible: !root.sourceIsChecking("flatpak") && root.sourceHasUpdates("flatpak")
 
                     delegate: Item {
                         width: ListView.view.width

@@ -37,7 +37,10 @@ Then enable the widget in the DMS Plugins tab and add it to DankBar.
 |---|---|---|
 | Terminal Application | `alacritty` | Terminal used to run updates (`kitty`, `foot`, `ghostty`, etc.) |
 | Refresh Interval | `60` min | How often to check for updates (5–240 min) |
+| Check on Startup | `true` | Run a check immediately when DMS starts |
+| Max List Height | `180` px | Maximum height for each update list before scrolling |
 | Show Flatpak Updates | `true` | Toggle Flatpak section on/off |
+| Hide When Up-to-Date | `false` | Hide the bar widget when no updates are available |
 
 ## Requirements
 

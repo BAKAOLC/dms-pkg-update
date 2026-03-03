@@ -44,9 +44,34 @@ PluginSettings {
     }
 
     ToggleSetting {
+        settingKey: "checkOnStartup"
+        label: "Check on Startup"
+        description: "Run an update check immediately when the shell starts, before the first periodic interval."
+        defaultValue: true
+    }
+
+    SliderSetting {
+        settingKey: "maxListHeight"
+        label: "Max List Height"
+        description: "Maximum height of each update list area inside the popout before it becomes scrollable."
+        defaultValue: 180
+        minimum: 120
+        maximum: 400
+        unit: "px"
+        leftIcon: "height"
+    }
+
+    ToggleSetting {
         settingKey: "showFlatpak"
         label: "Show Flatpak Updates"
         description: "Check and display Flatpak application updates alongside DNF packages."
         defaultValue: true
+    }
+
+    ToggleSetting {
+        settingKey: "hideWhenNoUpdates"
+        label: "Hide When Up-to-Date"
+        description: "Hide this widget from the bar when no package updates are available."
+        defaultValue: false
     }
 }
